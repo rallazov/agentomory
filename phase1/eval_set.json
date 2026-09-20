@@ -1,0 +1,94 @@
+[
+  {
+    "id": "q-cloud-agent-launch",
+    "query": "Cloud Agent launch rule",
+    "expect_any_substrings": [
+      "story-bound",
+      "Cloud Agent",
+      "story",
+      "non-negotiable",
+      "outer-loop"
+    ],
+    "expect_memory_types": [
+      "preference",
+      "constraint",
+      "strategy",
+      "decision",
+      "fact"
+    ],
+    "project_hint": "proj-cloud-agent-workflow"
+  },
+  {
+    "id": "q-calendar-sprint",
+    "query": "calendar sprint",
+    "expect_any_substrings": [
+      "calendar",
+      "Sprint 1",
+      "Nylas",
+      "Today"
+    ],
+    "expect_memory_types": [
+      "decision",
+      "project_state",
+      "fact",
+      "goal",
+      "task"
+    ],
+    "project_hint": "proj-calendar-sprint1"
+  },
+  {
+    "id": "q-local-memory-boundary",
+    "query": "local call memory not product RAG",
+    "expect_any_substrings": [
+      "not product",
+      "vector-memory",
+      "local",
+      "RAG"
+    ],
+    "expect_memory_types": [
+      "fact",
+      "constraint",
+      "preference"
+    ],
+    "project_hint": "proj-local-agent-memory"
+  },
+  {
+    "id": "q-team-ownership",
+    "query": "team ownership Jules Kit",
+    "expect_any_substrings": [
+      "Jules",
+      "Kit",
+      "ownership",
+      "Rae"
+    ],
+    "expect_memory_types": [
+      "decision",
+      "fact",
+      "preference"
+    ],
+    "project_hint": null
+  },
+  {
+    "id": "q-reversed-should-not-dominate",
+    "query": "call rule snippet mining turns",
+    "expect_any_substrings": [
+      "durable",
+      "not",
+      "transcript",
+      "reversed",
+      "six-month",
+      "hook"
+    ],
+    "forbid_status_in_pack": [
+      "superseded"
+    ],
+    "expect_memory_types": [
+      "lesson",
+      "preference",
+      "constraint",
+      "fact"
+    ],
+    "project_hint": null,
+    "notes": "Pack must not treat superseded/reversed as current truth"
+  }
+]

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentomory"
+version = "0.1.0"
+description = "Agentomory — local model-independent agent memory (SQLite + hybrid retrieval + memory packs)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ramin Allazov" }]
+keywords = ["agent", "memory", "sqlite", "retrieval", "fastembed"]
+dependencies = [
+  "fastembed>=0.8.0",
+  "sqlite-vec>=0.1.9",
+  "numpy>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rallazov/agentomory"
+Repository = "https://github.com/rallazov/agentomory"
+
+[project.scripts]
+agentomory = "phase1.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["phase1*"]
+
+[tool.setuptools.package-data]
+phase1 = ["py.typed", "eval_set.json"]

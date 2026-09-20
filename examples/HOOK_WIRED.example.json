@@ -1,0 +1,8 @@
+{
+  "method": "script+routine_prompt",
+  "command": "./examples/run_call_hook.example.sh",
+  "watched_paths": [
+    "$AGENTOMORY_CALLS_DIR"
+  ],
+  "note": "Example only — point at your local voice-call JSON directory. Do not commit absolute agent-data paths."
+}

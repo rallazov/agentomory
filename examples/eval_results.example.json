@@ -1,0 +1,13 @@
+{
+  "ts": null,
+  "summary": {
+    "n": 0,
+    "right_rate": null,
+    "miss_rate": null,
+    "irrelevant_rate": null,
+    "superseded_used_total": 0,
+    "avg_token_cost": null,
+    "avg_pack_size": null
+  },
+  "results": []
+}

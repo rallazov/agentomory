@@ -1,0 +1,48 @@
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Local memory DBs (never commit personal runtime data)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.bak
+*.bak-*
+agent_memory.sqlite*
+decisions.sqlite*
+
+# Personal / runtime dumps
+sample_queries.txt
+backfill_report.json
+HOOK_WIRED.json
+eval_results.json
+
+# Secrets / OS
+.env
+.env.*
+.DS_Store
+*.pem
+*.key
+
+# Editors / tooling
+.idea/
+.vscode/
+*.swp
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Chrome / agent runtime (if ever copied here)
+chrome-profile*/
+agent-data/
