@@ -1,4 +1,4 @@
-"""Phase 1 schema for agent_memory.sqlite (version 2: privacy, sources, vocabulary)."""
+"""Phase 1 schema for agent_memory.sqlite (version 3: privacy, sources, extract cursor)."""
 from __future__ import annotations
 
 import sqlite3
@@ -11,7 +11,7 @@ import sqlite_vec
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "agent_memory.sqlite"
 EMBED_DIM = 384
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MEMORY_TYPES = (
     "fact",
@@ -207,6 +207,22 @@ CREATE TABLE IF NOT EXISTS processed_sources (
   notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS extraction_progress (
+  source_kind TEXT PRIMARY KEY,
+  last_conversation_id TEXT,
+  last_seq INTEGER,
+  last_message_id TEXT,
+  last_created_at TEXT,
+  processed_at TEXT NOT NULL,
+  notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS extracted_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  extracted_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -222,6 +238,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 
 CREATE INDEX IF NOT EXISTS idx_memory_sources_memory ON memory_sources(memory_id);
 CREATE INDEX IF NOT EXISTS idx_vocabulary_norm ON vocabulary(kind, normalized);
+CREATE INDEX IF NOT EXISTS idx_extracted_messages_conv ON extracted_messages(conversation_id);
 """
 
 # Created after migrate_schema so older DBs get new columns first.

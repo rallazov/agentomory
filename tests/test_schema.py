@@ -30,6 +30,8 @@ def test_schema_creation(db_path):
         "retrieval_log",
         "schema_migrations",
         "memories_vec",
+        "extraction_progress",
+        "extracted_messages",
     ):
         assert name in tables
     fts = conn.execute(

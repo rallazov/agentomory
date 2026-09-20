@@ -204,6 +204,9 @@ def hybrid_search(
             continue
         if memory_types and row["memory_type"] not in memory_types:
             continue
+        if project_id and row["project_id"] and row["project_id"] != project_id:
+            # Hard scope: a selected project must not leak foreign-project rows.
+            continue
 
         vs = vec_score.get(mid, 0.0)
         fs = fts_score.get(mid, 0.0)
@@ -219,8 +222,6 @@ def hybrid_search(
         origin_pen = 1.0 if row["origin"] == "agent_inferred" else 0.0
         corr = 1.0 if row["memory_type"] == "correction" else 0.0
         project_boost = 0.08 if project_id and row["project_id"] == project_id else 0.0
-        if project_id and row["project_id"] and row["project_id"] != project_id:
-            project_boost = -0.06
 
         score = (
             w["vector"] * vs

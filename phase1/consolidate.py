@@ -239,12 +239,52 @@ def find_similar(
     return [(row, m) for _, row, m in scored[:limit]]
 
 
-def _is_correction(candidate: Dict[str, Any]) -> bool:
+_POS_POLARITY = re.compile(r"\b(always|must|do)\b", re.I)
+_NEG_POLARITY = re.compile(
+    r"\b(never|don't|do not|must not|cannot|can't|no longer)\b", re.I
+)
+_CORRECTION_MARK = re.compile(
+    r"\b(actually|that's wrong|that is wrong|correction|not true|instead|"
+    r"no longer|supersede|forget that|ignore that)\b",
+    re.I,
+)
+
+
+def _polarity(text: str) -> str:
+    t = text or ""
+    neg = bool(_NEG_POLARITY.search(t))
+    pos = bool(_POS_POLARITY.search(t)) and not neg
+    if pos and not neg:
+        return "pos"
+    if neg and not pos:
+        return "neg"
+    return "none"
+
+
+def _polarity_conflict(a: str, b: str) -> bool:
+    pa, pb = _polarity(a), _polarity(b)
+    return {pa, pb} == {"pos", "neg"}
+
+
+def _looks_like_correction(candidate: Dict[str, Any]) -> bool:
     if candidate.get("appears_to_correct"):
         return True
     if candidate.get("memory_type") == "correction":
         return True
-    return False
+    text = candidate.get("canonical_text") or ""
+    return bool(_CORRECTION_MARK.search(text))
+
+
+def _is_correction(candidate: Dict[str, Any]) -> bool:
+    return _looks_like_correction(candidate)
+
+
+def _same_topic(candidate: Dict[str, Any], row, meta: Dict[str, float]) -> bool:
+    if meta.get("semantic", 0) >= 0.55:
+        return True
+    if meta.get("jaccard", 0) >= 0.35:
+        return True
+    return _shared_content(candidate.get("canonical_text") or "", row["canonical_text"] or "")
 
 
 def _same_proposition(candidate: Dict[str, Any], row, meta: Dict[str, float], conn) -> bool:
@@ -272,15 +312,18 @@ def decide_action(
     sem = meta.get("semantic", 0.0)
     jac = meta.get("jaccard", 0.0)
 
-    if _is_correction(candidate):
+    polarity_flip = _polarity_conflict(candidate.get("canonical_text") or "", best["canonical_text"] or "")
+    correction = _looks_like_correction(candidate) or polarity_flip
+    # SUPERSEDE / CONFLICT always beat Jaccard-ish MERGE/IGNORE/UPDATE.
+    if correction:
         conf = float(candidate.get("confidence", 0.5))
-        if (
-            conn is not None
-            and _same_proposition(candidate, best, meta, conn)
-            and conf >= SUPERSEDE_MIN_CONFIDENCE
-            and sem >= SEM_SUPERSEDE
-        ):
-            return ACTION_SUPERSEDE, best, meta
+        same_topic = _same_topic(candidate, best, meta)
+        if conn is not None:
+            same_topic = same_topic or _same_proposition(candidate, best, meta, conn)
+        if same_topic and (polarity_flip or _is_correction(candidate)):
+            if conf >= SUPERSEDE_MIN_CONFIDENCE and (sem >= 0.55 or jac >= 0.35 or polarity_flip):
+                return ACTION_SUPERSEDE, best, meta
+            return ACTION_CONFLICT, best, meta
         if SEM_CONFLICT_LO <= sem < SEM_SUPERSEDE or (sem >= SEM_SUPERSEDE and conf < SUPERSEDE_MIN_CONFIDENCE):
             return ACTION_CONFLICT, best, meta
         return ACTION_CREATE, None, meta

@@ -481,21 +481,87 @@ def is_useful(text: str) -> bool:
     return looks_memory_worthy(text)
 
 
+PROGRESS_KIND_MESSAGES = "messages"
+
+
+def get_extraction_progress(*, db_path=None, conn=None, source_kind: str = PROGRESS_KIND_MESSAGES):
+    own = conn is None
+    if own:
+        conn = ensure_schema(connect(db_path) if db_path else None)
+    row = conn.execute(
+        "SELECT * FROM extraction_progress WHERE source_kind=?", (source_kind,)
+    ).fetchone()
+    out = dict(row) if row else None
+    if own:
+        conn.close()
+    return out
+
+
+def _mark_message_extracted(conn, message: Dict[str, Any]) -> None:
+    now = _now()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO extracted_messages (message_id, conversation_id, extracted_at)
+        VALUES (?,?,?)
+        """,
+        (message["id"], message["conversation_id"], now),
+    )
+    conn.execute(
+        """
+        INSERT INTO extraction_progress (
+          source_kind, last_conversation_id, last_seq, last_message_id,
+          last_created_at, processed_at, notes
+        ) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(source_kind) DO UPDATE SET
+          last_conversation_id=excluded.last_conversation_id,
+          last_seq=excluded.last_seq,
+          last_message_id=excluded.last_message_id,
+          last_created_at=excluded.last_created_at,
+          processed_at=excluded.processed_at,
+          notes=excluded.notes
+        """,
+        (
+            PROGRESS_KIND_MESSAGES,
+            message["conversation_id"],
+            message["seq"],
+            message["id"],
+            message.get("created_at"),
+            now,
+            "messages",
+        ),
+    )
+
+
+def _unprocessed_messages(conn, *, conversation_id: Optional[str] = None, limit: int = 500):
+    """Messages not yet extracted — never re-scan a fixed prefix."""
+    if conversation_id:
+        return conn.execute(
+            """
+            SELECT m.* FROM messages m
+            LEFT JOIN extracted_messages e ON e.message_id = m.id
+            WHERE m.conversation_id=? AND e.message_id IS NULL
+            ORDER BY m.seq
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT m.* FROM messages m
+        LEFT JOIN extracted_messages e ON e.message_id = m.id
+        WHERE e.message_id IS NULL
+        ORDER BY COALESCE(m.created_at, ''), m.conversation_id, m.seq
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
 def extract_from_messages(
     *, conversation_id: Optional[str] = None, db_path=None, limit: int = 500
 ) -> List[Dict[str, Any]]:
     conn = ensure_schema(connect(db_path) if db_path else None)
-    if conversation_id:
-        rows = conn.execute(
-            "SELECT * FROM messages WHERE conversation_id=? ORDER BY seq",
-            (conversation_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM messages ORDER BY conversation_id, seq LIMIT ?",
-            (limit * 5,),
-        ).fetchall()
-    rows = [dict(r) for r in rows]
+    rows = [dict(r) for r in _unprocessed_messages(conn, conversation_id=conversation_id, limit=limit)]
     conn.close()
 
     results = []
@@ -510,8 +576,13 @@ def extract_from_messages(
         for cand in cands:
             out = apply_memory(cand, db_path=db_path)
             results.append({**out, "type": cand["memory_type"], "origin": cand["origin"], "candidate": cand})
-            if len(results) >= limit:
-                return results
+        # Advance the cursor even when a message yields no candidates.
+        conn = ensure_schema(connect(db_path) if db_path else None)
+        try:
+            _mark_message_extracted(conn, r)
+            conn.commit()
+        finally:
+            conn.close()
     return results
 
 

@@ -65,6 +65,7 @@ def cmd_pack(args):
         request_id=args.request_id,
         turn_id=args.turn_id,
         model_used=args.model,
+        max_tokens=args.max_tokens,
     )
     print(json.dumps(pack, indent=2))
 
@@ -173,6 +174,7 @@ def main(argv=None):
         sp.add_argument("--request-id", default=None)
         sp.add_argument("--turn-id", default=None)
         sp.add_argument("--model", default=None)
+        sp.add_argument("--max-tokens", type=int, default=480, dest="max_tokens")
 
     q = sub.add_parser("query")
     _add_pack_args(q)
