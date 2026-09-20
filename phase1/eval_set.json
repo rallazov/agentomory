@@ -1,94 +1,177 @@
-[
-  {
-    "id": "q-cloud-agent-launch",
-    "query": "Cloud Agent launch rule",
-    "expect_any_substrings": [
-      "story-bound",
-      "Cloud Agent",
-      "story",
-      "non-negotiable",
-      "outer-loop"
+{
+  "fixture": {
+    "projects": [
+      {
+        "id": "proj-alpha",
+        "name": "Alpha Store",
+        "purpose": "Local persistence layer for agent memory.",
+        "current_goal": "Keep the store on-device.",
+        "current_stage": "active",
+        "current_summary": "Alpha owns the on-device store decision."
+      },
+      {
+        "id": "proj-beta",
+        "name": "Beta Notifications",
+        "purpose": "User notification delivery.",
+        "current_goal": "Quiet hours.",
+        "current_stage": "active",
+        "current_summary": "Beta owns notification quiet hours."
+      }
     ],
-    "expect_memory_types": [
-      "preference",
-      "constraint",
-      "strategy",
-      "decision",
-      "fact"
+    "vocabulary": [
+      {
+        "term": "alpha store",
+        "kind": "project_alias",
+        "project_id": "proj-alpha",
+        "canonical": "Alpha Store"
+      },
+      {
+        "term": "beta notify",
+        "kind": "project_alias",
+        "project_id": "proj-beta",
+        "canonical": "Beta Notifications"
+      }
     ],
-    "project_hint": "proj-cloud-agent-workflow"
+    "memories": [
+      {
+        "id": "mem-sqlite-store",
+        "memory_type": "decision",
+        "title": "SQLite local store",
+        "canonical_text": "Use SQLite for the local memory store.",
+        "importance": 0.88,
+        "confidence": 0.92,
+        "project_id": "proj-alpha"
+      },
+      {
+        "id": "mem-no-cloud-tokens",
+        "memory_type": "constraint",
+        "title": "No cloud tokens",
+        "canonical_text": "Never send calendar tokens to an external model.",
+        "importance": 0.93,
+        "confidence": 0.94,
+        "project_id": "proj-alpha",
+        "local_only": 1,
+        "never_send_external_model": 1,
+        "sensitive": 1,
+        "remote_ok": 0
+      },
+      {
+        "id": "mem-quiet-hours",
+        "memory_type": "preference",
+        "title": "Quiet hours",
+        "canonical_text": "Do not send notifications after 21:00 local time.",
+        "importance": 0.8,
+        "confidence": 0.9,
+        "project_id": "proj-beta"
+      },
+      {
+        "id": "mem-old-postgres",
+        "memory_type": "decision",
+        "title": "Old postgres choice",
+        "canonical_text": "Use PostgreSQL for the local memory store.",
+        "importance": 0.86,
+        "confidence": 0.8,
+        "status": "superseded",
+        "project_id": "proj-alpha",
+        "why_failed": null
+      },
+      {
+        "id": "mem-unrelated-high",
+        "memory_type": "preference",
+        "title": "Favorite snack",
+        "canonical_text": "The operator prefers salted almonds during long sessions.",
+        "importance": 0.99,
+        "confidence": 0.99,
+        "project_id": null
+      },
+      {
+        "id": "mem-ship-friday",
+        "memory_type": "decision",
+        "title": "Ship on Friday",
+        "canonical_text": "Ship the Alpha Store beta to testers on Friday.",
+        "importance": 0.7,
+        "confidence": 0.8,
+        "project_id": "proj-alpha"
+      },
+      {
+        "id": "mem-ship-monday",
+        "memory_type": "decision",
+        "title": "Ship on Monday",
+        "canonical_text": "Ship the Alpha Store beta to testers on Monday, not Friday.",
+        "importance": 0.78,
+        "confidence": 0.86,
+        "project_id": "proj-alpha",
+        "appears_to_correct": true
+      }
+    ]
   },
-  {
-    "id": "q-calendar-sprint",
-    "query": "calendar sprint",
-    "expect_any_substrings": [
-      "calendar",
-      "Sprint 1",
-      "Nylas",
-      "Today"
-    ],
-    "expect_memory_types": [
-      "decision",
-      "project_state",
-      "fact",
-      "goal",
-      "task"
-    ],
-    "project_hint": "proj-calendar-sprint1"
-  },
-  {
-    "id": "q-local-memory-boundary",
-    "query": "local call memory not product RAG",
-    "expect_any_substrings": [
-      "not product",
-      "vector-memory",
-      "local",
-      "RAG"
-    ],
-    "expect_memory_types": [
-      "fact",
-      "constraint",
-      "preference"
-    ],
-    "project_hint": "proj-local-agent-memory"
-  },
-  {
-    "id": "q-team-ownership",
-    "query": "team ownership Jules Kit",
-    "expect_any_substrings": [
-      "Jules",
-      "Kit",
-      "ownership",
-      "Rae"
-    ],
-    "expect_memory_types": [
-      "decision",
-      "fact",
-      "preference"
-    ],
-    "project_hint": null
-  },
-  {
-    "id": "q-reversed-should-not-dominate",
-    "query": "call rule snippet mining turns",
-    "expect_any_substrings": [
-      "durable",
-      "not",
-      "transcript",
-      "reversed",
-      "six-month",
-      "hook"
-    ],
-    "forbid_status_in_pack": [
-      "superseded"
-    ],
-    "expect_memory_types": [
-      "lesson",
-      "preference",
-      "constraint",
-      "fact"
-    ],
-    "project_hint": null,
-    "notes": "Pack must not treat superseded/reversed as current truth"
-  }
-]
+  "cases": [
+    {
+      "id": "adv-paraphrase-same-fact",
+      "query": "what database should the on-device memory use",
+      "expect_ids": ["mem-sqlite-store"],
+      "expect_propositions": ["sqlite is the local memory store"],
+      "expect_project": "proj-alpha",
+      "k": 3,
+      "adversarial": "same fact different wording"
+    },
+    {
+      "id": "adv-similar-different-decisions",
+      "query": "when do we ship the Alpha Store beta to testers",
+      "expect_ids": ["mem-ship-monday", "mem-ship-friday"],
+      "k": 3,
+      "adversarial": "two similar but different decisions"
+    },
+    {
+      "id": "adv-correction-over-old",
+      "query": "local memory store engine",
+      "expect_ids": ["mem-sqlite-store"],
+      "forbid_ids": ["mem-old-postgres"],
+      "k": 3,
+      "adversarial": "old decision then correction"
+    },
+    {
+      "id": "adv-unrelated-high-importance",
+      "query": "what store holds agent memory on this machine",
+      "expect_ids": ["mem-sqlite-store"],
+      "forbid_ids": ["mem-unrelated-high"],
+      "k": 3,
+      "adversarial": "unrelated high-importance memory"
+    },
+    {
+      "id": "adv-vague-query",
+      "query": "what should I remember about this",
+      "k": 3,
+      "min_score": 0.42,
+      "adversarial": "vague query"
+    },
+    {
+      "id": "adv-zero-result",
+      "query": "purple helicopter warranty claim for mars potatoes",
+      "expect_empty": true,
+      "k": 8,
+      "adversarial": "query where nothing should be returned"
+    },
+    {
+      "id": "q-project-alias",
+      "query": "alpha store persistence decision",
+      "expect_ids": ["mem-sqlite-store"],
+      "expect_project": "proj-alpha",
+      "k": 3
+    },
+    {
+      "id": "q-wrong-project-should-not-dominate",
+      "query": "beta notify quiet hours",
+      "expect_ids": ["mem-quiet-hours"],
+      "expect_project": "proj-beta",
+      "k": 3
+    },
+    {
+      "id": "q-stale-must-stay-out",
+      "query": "which database did we lock for local memory",
+      "expect_ids": ["mem-sqlite-store"],
+      "forbid_status_in_pack": ["superseded"],
+      "k": 3
+    }
+  ]
+}

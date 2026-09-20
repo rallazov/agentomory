@@ -18,6 +18,7 @@ from phase1.seed_projects import seed  # noqa: E402
 from phase1.memory_pack import build_pack  # noqa: E402
 from phase1.eval_harness import run_eval  # noqa: E402
 from phase1.embed import get_embedder  # noqa: E402
+from phase1.retrieval_log import attach_retrieval_feedback  # noqa: E402
 
 
 def cmd_ensure(args):
@@ -53,7 +54,18 @@ def cmd_extract(args):
 
 
 def cmd_pack(args):
-    pack = build_pack(args.query, k=args.k, project_id=args.project, db_path=args.db)
+    pack = build_pack(
+        args.query,
+        k=args.k,
+        project_id=args.project,
+        current_project_id=getattr(args, "current_project", None),
+        db_path=args.db,
+        min_score=args.min_score,
+        destination=args.destination,
+        request_id=args.request_id,
+        turn_id=args.turn_id,
+        model_used=args.model,
+    )
     print(json.dumps(pack, indent=2))
 
 
@@ -62,7 +74,22 @@ def cmd_query(args):
 
 
 def cmd_eval(args):
-    print(json.dumps(run_eval(db_path=args.db).get("summary"), indent=2))
+    print(json.dumps(run_eval(db_path=args.db, fixture=args.fixture).get("summary"), indent=2))
+
+
+def cmd_feedback(args):
+    n = attach_retrieval_feedback(
+        request_id=args.request_id,
+        turn_id=args.turn_id,
+        log_id=args.log_id,
+        model_used=args.model,
+        user_accepted=args.accepted,
+        user_corrected=args.corrected,
+        helpfulness=args.helpfulness,
+        task_outcome=args.outcome,
+        db_path=args.db,
+    )
+    print(json.dumps({"updated": n}))
 
 
 def cmd_rebuild_embeddings(args):
@@ -136,17 +163,36 @@ def main(argv=None):
     e = sub.add_parser("extract")
     e.add_argument("--limit", type=int, default=200)
     e.set_defaults(func=cmd_extract)
+    def _add_pack_args(sp):
+        sp.add_argument("query")
+        sp.add_argument("-k", type=int, default=8, help="useful maximum pack size (may return fewer or zero)")
+        sp.add_argument("--project", default=None, help="explicit current project id from the calling agent")
+        sp.add_argument("--current-project", default=None, dest="current_project")
+        sp.add_argument("--min-score", type=float, default=0.36)
+        sp.add_argument("--destination", default="local", choices=("local", "external_model"))
+        sp.add_argument("--request-id", default=None)
+        sp.add_argument("--turn-id", default=None)
+        sp.add_argument("--model", default=None)
+
     q = sub.add_parser("query")
-    q.add_argument("query")
-    q.add_argument("-k", type=int, default=6)
-    q.add_argument("--project", default=None)
+    _add_pack_args(q)
     q.set_defaults(func=cmd_query)
     pk = sub.add_parser("pack")
-    pk.add_argument("query")
-    pk.add_argument("-k", type=int, default=6)
-    pk.add_argument("--project", default=None)
+    _add_pack_args(pk)
     pk.set_defaults(func=cmd_pack)
-    sub.add_parser("eval").set_defaults(func=cmd_eval)
+    ev = sub.add_parser("eval")
+    ev.add_argument("--fixture", action="store_true", help="seed the built-in eval fixture into a temp DB")
+    ev.set_defaults(func=cmd_eval)
+    fb = sub.add_parser("feedback")
+    fb.add_argument("--request-id", default=None)
+    fb.add_argument("--turn-id", default=None)
+    fb.add_argument("--log-id", type=int, default=None)
+    fb.add_argument("--model", default=None)
+    fb.add_argument("--accepted", action="store_true")
+    fb.add_argument("--corrected", action="store_true")
+    fb.add_argument("--helpfulness", default=None, choices=("helpful", "not_helpful", "mixed"))
+    fb.add_argument("--outcome", default=None)
+    fb.set_defaults(func=cmd_feedback)
     sub.add_parser("rebuild-embeddings").set_defaults(func=cmd_rebuild_embeddings)
     b = sub.add_parser("bootstrap")
     b.add_argument("--limit", type=int, default=300)

@@ -1,4 +1,4 @@
-"""Hybrid retrieval: vector + FTS + filters + configurable weights."""
+"""Hybrid retrieval: vector + FTS + filters + configurable weights. No project-specific aliases."""
 from __future__ import annotations
 
 import math
@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .embed import get_embedder
+from .privacy import DESTINATION_LOCAL, allowed_for_destination
 from .schema import connect, ensure_schema
+from .vocabulary import expansions_for_query
 
 DEFAULT_WEIGHTS = {
     "vector": 0.35,
@@ -35,28 +37,26 @@ TYPE_BOOST = {
     "open_question": 0.5,
 }
 
+# Absolute relevance floor. Pack size is a maximum, not a quota.
+DEFAULT_MIN_SCORE = 0.36
+DEFAULT_RELATIVE_KEEP = 0.45
+DEFAULT_MIN_COSINE = 0.35
 
-def expand_query(query: str) -> List[str]:
-    q = query.strip()
-    expansions = [q]
-    aliases = {
-        r"cloud agent": ["story-bound", "cloud agent launch", "story template"],
-        r"calendar": ["sprint 1", "calendar strip", "nylas", "today calendar"],
-        r"sprint": ["sprint 1", "calendar sprint", "two-month plan"],
-        r"launch rule": ["cloud agent launch", "non-negotiable", "story-bound"],
-    }
-    low = q.lower()
-    for pat, extras in aliases.items():
-        if re.search(pat, low):
-            expansions.extend(extras)
-    # unique preserve order
-    seen = set()
-    out = []
-    for e in expansions:
-        if e.lower() not in seen:
-            seen.add(e.lower())
-            out.append(e)
-    return out
+
+def expand_query(query: str, *, conn=None, db_path=None) -> List[str]:
+    """Expand using vocabulary stored in SQLite. Engine stays project-agnostic."""
+    expansions = [query.strip()]
+    seen = {query.strip().lower()}
+    try:
+        extra = expansions_for_query(query, conn=conn, db_path=db_path)
+    except Exception:
+        extra = []
+    for e in extra:
+        key = e.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            expansions.append(e)
+    return expansions
 
 
 def _recency_score(updated_at: str) -> float:
@@ -73,6 +73,34 @@ def _fts_query(text: str) -> str:
     return " OR ".join(words[:10]) if words else text
 
 
+def _token_overlap(query: str, text: str) -> float:
+    q = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
+    if not q:
+        return 0.0
+    m = set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
+    return len(q & m) / len(q)
+
+
+def _l2_to_cosine(dist: float) -> float:
+    return max(0.0, 1.0 - (float(dist) ** 2) / 2.0)
+
+
+def apply_relevance_floor(
+    hits: List[Dict[str, Any]],
+    *,
+    min_score: float = DEFAULT_MIN_SCORE,
+    relative: float = DEFAULT_RELATIVE_KEEP,
+) -> List[Dict[str, Any]]:
+    """Drop weak hits. May return an empty list — that is correct."""
+    if not hits:
+        return []
+    best = hits[0]["score"]
+    if best < min_score:
+        return []
+    floor = max(min_score * 0.85, best * relative)
+    return [h for h in hits if h["score"] >= floor]
+
+
 def hybrid_search(
     query: str,
     *,
@@ -81,35 +109,37 @@ def hybrid_search(
     memory_types: Optional[List[str]] = None,
     weights: Optional[Dict[str, float]] = None,
     db_path=None,
+    min_score: float = DEFAULT_MIN_SCORE,
+    destination: str = DESTINATION_LOCAL,
+    apply_floor: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, float]]:
     """
-    Returns (scored hits, expanded_queries, per-id raw component scores summary).
-    Only active memories; corrections/supersession already reflected in status.
+    Returns (scored hits, expanded_queries, per-id scores).
+    Only active memories. k is a maximum; relevance floor may yield zero hits.
     """
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
     conn = ensure_schema(connect(db_path) if db_path else None)
-    expanded = expand_query(query)
+    expanded = expand_query(query, conn=conn)
 
-    # --- vector ---
-    emb = get_embedder().embed_query(query)
+    # --- vector (absolute cosine, not intra-set min-max) ---
     fetch_n = max(k * 5, 40)
-    vec_rows = conn.execute(
-        """
-        SELECT v.memory_id AS memory_id, v.distance AS distance, m.*
-        FROM memories_vec v
-        JOIN memories m ON m.id = v.memory_id
-        WHERE v.embedding MATCH ? AND k = ?
-          AND m.status = 'active'
-        ORDER BY v.distance
-        """,
-        (emb, fetch_n),
-    ).fetchall()
     vec_score: Dict[str, float] = {}
-    if vec_rows:
-        dmax = max(float(r["distance"]) for r in vec_rows) or 1.0
+    try:
+        emb = get_embedder().embed_query(query)
+        vec_rows = conn.execute(
+            """
+            SELECT v.memory_id AS memory_id, v.distance AS distance
+            FROM memories_vec v
+            WHERE v.embedding MATCH ? AND k = ?
+            """,
+            (emb, fetch_n),
+        ).fetchall()
         for r in vec_rows:
-            # lower distance better → 1 - normalized
-            vec_score[r["memory_id"]] = 1.0 - (float(r["distance"]) / (dmax + 1e-6))
+            cos = _l2_to_cosine(float(r["distance"]))
+            if cos >= DEFAULT_MIN_COSINE:
+                vec_score[r["memory_id"]] = cos
+    except Exception:
+        vec_score = {}
 
     # --- FTS ---
     fts_score: Dict[str, float] = {}
@@ -120,7 +150,7 @@ def hybrid_search(
         try:
             rows = conn.execute(
                 """
-                SELECT f.memory_id AS memory_id, bm25(memories_fts) AS rank, m.*
+                SELECT f.memory_id AS memory_id, bm25(memories_fts) AS rank
                 FROM memories_fts f
                 JOIN memories m ON m.id = f.memory_id
                 WHERE memories_fts MATCH ? AND m.status = 'active'
@@ -133,7 +163,6 @@ def hybrid_search(
             continue
         if not rows:
             continue
-        # bm25: lower is better in sqlite fts5
         ranks = [float(r["rank"]) for r in rows]
         rmin, rmax = min(ranks), max(ranks)
         for r in rows:
@@ -141,14 +170,8 @@ def hybrid_search(
             norm = 1.0 - ((raw - rmin) / (rmax - rmin + 1e-6))
             fts_score[r["memory_id"]] = max(fts_score.get(r["memory_id"], 0.0), norm)
 
-    # candidate universe
     ids = set(vec_score) | set(fts_score)
-    if project_id:
-        proj_rows = conn.execute(
-            "SELECT id FROM memories WHERE status='active' AND project_id=?",
-            (project_id,),
-        ).fetchall()
-        ids |= {r["id"] for r in proj_rows}
+    # Do not union every project memory — that forced irrelevant fills.
 
     hits: List[Dict[str, Any]] = []
     score_map: Dict[str, float] = {}
@@ -156,14 +179,18 @@ def hybrid_search(
         row = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
         if not row or row["status"] != "active":
             continue
+        if not allowed_for_destination(row, destination, auto_retrieve=True):
+            continue
         if memory_types and row["memory_type"] not in memory_types:
             continue
-        if project_id and row["project_id"] and row["project_id"] != project_id:
-            # soft: still allow but no project boost
-            pass
 
         vs = vec_score.get(mid, 0.0)
         fs = fts_score.get(mid, 0.0)
+        overlap = _token_overlap(query, f"{row['title']} {row['canonical_text']}")
+        # Require some real signal; importance alone must not keep a memory.
+        if vs < DEFAULT_MIN_COSINE and overlap < 0.12 and fs < 0.55:
+            continue
+
         imp = float(row["importance"])
         conf = float(row["confidence"])
         rec = _recency_score(row["updated_at"])
@@ -171,6 +198,8 @@ def hybrid_search(
         origin_pen = 1.0 if row["origin"] == "agent_inferred" else 0.0
         corr = 1.0 if row["memory_type"] == "correction" else 0.0
         project_boost = 0.08 if project_id and row["project_id"] == project_id else 0.0
+        if project_id and row["project_id"] and row["project_id"] != project_id:
+            project_boost = -0.06
 
         score = (
             w["vector"] * vs
@@ -183,7 +212,6 @@ def hybrid_search(
             + project_boost
             - w["origin_penalty"] * origin_pen
         )
-        # never present agent speculation as user fact: downrank hard if low conf inferred
         if row["origin"] == "agent_inferred" and conf < 0.5:
             score *= 0.5
 
@@ -204,6 +232,14 @@ def hybrid_search(
                 "provenance_conversation_id": row["provenance_conversation_id"],
                 "provenance_message_ids": row["provenance_message_ids"],
                 "provenance_artifact_id": row["provenance_artifact_id"],
+                "remote_ok": row["remote_ok"] if "remote_ok" in row.keys() else 1,
+                "local_only": row["local_only"] if "local_only" in row.keys() else 0,
+                "sensitive": row["sensitive"] if "sensitive" in row.keys() else 0,
+                "never_auto_retrieve": row["never_auto_retrieve"] if "never_auto_retrieve" in row.keys() else 0,
+                "never_send_external_model": (
+                    row["never_send_external_model"] if "never_send_external_model" in row.keys() else 0
+                ),
+                "temporal_meaning": row["temporal_meaning"] if "temporal_meaning" in row.keys() else None,
                 "components": {
                     "vector": vs,
                     "fts": fs,
@@ -212,10 +248,13 @@ def hybrid_search(
                     "recency": rec,
                     "type_boost": tb,
                     "origin_penalty": origin_pen,
+                    "overlap": overlap,
                 },
             }
         )
 
     hits.sort(key=lambda h: -h["score"])
+    if apply_floor:
+        hits = apply_relevance_floor(hits, min_score=min_score)
     conn.close()
     return hits[:k], expanded, score_map

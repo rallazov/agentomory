@@ -97,4 +97,27 @@ def seed(*, db_path=None) -> List[Dict[str, Any]]:
         conn.commit()
     finally:
         conn.close()
+    # Aliases live in SQLite so retrieve.py / memory_pack.py stay engine-generic.
+    _seed_vocabulary(db_path=db_path)
     return out
+
+
+# Optional seed data only — never imported by retrieve.py / memory_pack.py.
+_VOCAB_SEEDS = [
+    {"term": "calendar", "kind": "project_alias", "project_id": "proj-calendar-sprint1", "canonical": "Calendar Sprint 1"},
+    {"term": "calendar sprint", "kind": "project_alias", "project_id": "proj-calendar-sprint1", "canonical": "Calendar Sprint 1"},
+    {"term": "sprint 1", "kind": "project_alias", "project_id": "proj-calendar-sprint1", "canonical": "Calendar Sprint 1"},
+    {"term": "nylas", "kind": "project_alias", "project_id": "proj-calendar-sprint1", "canonical": "Calendar Sprint 1"},
+    {"term": "cloud agent", "kind": "project_alias", "project_id": "proj-cloud-agent-workflow", "canonical": "Cloud Agent workflow"},
+    {"term": "story-bound", "kind": "synonym", "project_id": "proj-cloud-agent-workflow", "canonical": "story-bound launch rule"},
+    {"term": "outer-loop", "kind": "synonym", "project_id": "proj-cloud-agent-workflow", "canonical": "outer-loop babysitter"},
+    {"term": "local memory", "kind": "project_alias", "project_id": "proj-local-agent-memory", "canonical": "Local agent memory"},
+    {"term": "agentomory", "kind": "project_alias", "project_id": "proj-local-agent-memory", "canonical": "Local agent memory"},
+]
+
+
+def _seed_vocabulary(*, db_path=None) -> None:
+    from .vocabulary import upsert_term
+
+    for row in _VOCAB_SEEDS:
+        upsert_term(db_path=db_path, **row)

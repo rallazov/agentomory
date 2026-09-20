@@ -94,6 +94,9 @@ def migrate(*, v0_path: Path | None = None, db_path=None) -> Dict[str, Any]:
                         conv_id, msg_ids, None, prov_note, r["source_kind"], r["id"], now, now,
                     ),
                 )
+                from .provenance import add_sources_from_candidate
+
+                add_sources_from_candidate(conn, cand["id"], cand, role="original")
                 conn.commit()
                 conn.close()
                 stats["reversed_imported"] += 1
@@ -127,6 +130,9 @@ def migrate(*, v0_path: Path | None = None, db_path=None) -> Dict[str, Any]:
                     conv_id, msg_ids, None, prov_note, r["source_kind"], r["id"], now, now,
                 ),
             )
+            from .provenance import add_sources_from_candidate
+
+            add_sources_from_candidate(conn, cand["id"], cand, role="original")
             conn.commit()
             conn.close()
             stats["SUPERSEDE"] += 1

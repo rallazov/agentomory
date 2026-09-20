@@ -1,14 +1,16 @@
-"""Build small memory packs for CEO turns."""
+"""Build small high-signal memory packs. k is a useful maximum, not a fill quota."""
 from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional
 
-from .retrieve import hybrid_search
+from .privacy import DESTINATION_LOCAL
+from .project_resolve import resolve_project
+from .retrieve import DEFAULT_MIN_SCORE, hybrid_search
 from .retrieval_log import log_retrieval
 from .schema import connect, ensure_schema
 
-DEFAULT_PACK_SIZE = 6  # within 3–8
+DEFAULT_PACK_SIZE = 8  # useful maximum; may return 0
 
 
 def _approx_tokens(text: str) -> int:
@@ -26,21 +28,16 @@ def get_project(project_id: str, *, db_path=None) -> Optional[Dict[str, Any]]:
     return d
 
 
-def find_project_for_query(query: str, *, db_path=None) -> Optional[str]:
-    conn = ensure_schema(connect(db_path) if db_path else None)
-    q = query.lower()
-    rows = conn.execute("SELECT id, name, purpose, current_summary FROM projects WHERE status='active'").fetchall()
-    found = None
-    for r in rows:
-        blob = f"{r['name']} {r['purpose'] or ''} {r['current_summary'] or ''}".lower()
-        if any(tok in blob for tok in q.split() if len(tok) > 3):
-            found = r["id"]; break
-        if "calendar" in q and "calendar" in blob:
-            found = r["id"]; break
-        if "cloud agent" in q and "cloud" in blob:
-            found = r["id"]; break
-    conn.close()
-    return found
+def find_project_for_query(
+    query: str,
+    *,
+    db_path=None,
+    current_project_id: Optional[str] = None,
+) -> Optional[str]:
+    """Backward-compatible wrapper around confidence-aware resolution."""
+    return resolve_project(
+        query, current_project_id=current_project_id, db_path=db_path
+    ).project_id
 
 
 def build_pack(
@@ -48,35 +45,56 @@ def build_pack(
     *,
     k: int = DEFAULT_PACK_SIZE,
     project_id: Optional[str] = None,
+    current_project_id: Optional[str] = None,
     weights: Optional[Dict[str, float]] = None,
     db_path=None,
     log: bool = True,
+    min_score: float = DEFAULT_MIN_SCORE,
+    destination: str = DESTINATION_LOCAL,
+    request_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    model_used: Optional[str] = None,
 ) -> Dict[str, Any]:
-    k = max(3, min(8, k))
-    if not project_id:
-        project_id = find_project_for_query(query, db_path=db_path)
+    """
+    Build a memory pack.
+
+    k is the useful *maximum*. Fewer (or zero) memories are returned when
+    nothing clears the relevance floor. Explicit current_project_id / project_id
+    from the calling agent wins; otherwise resolution may abstain.
+    """
+    k = max(0, min(16, int(k)))
+    explicit = current_project_id or project_id
+    resolution = resolve_project(query, current_project_id=explicit, db_path=db_path)
+    resolved_id = resolution.project_id
 
     hits, expanded, score_map = hybrid_search(
-        query, k=max(k * 2, 12), project_id=project_id, weights=weights, db_path=db_path
+        query,
+        k=max(k * 2, 12) if k else 12,
+        project_id=resolved_id,
+        weights=weights,
+        db_path=db_path,
+        min_score=min_score,
+        destination=destination,
+        apply_floor=True,
     )
 
-    # Prefer diversity of types in pack
+    # Prefer type diversity but never pad with sub-floor hits.
     pack: List[Dict[str, Any]] = []
-    seen_types = set()
-    for h in hits:
-        if len(pack) >= k:
-            break
-        # first pass: fill unique types
-        if h["memory_type"] not in seen_types or len(pack) < k // 2:
-            pack.append(h)
-            seen_types.add(h["memory_type"])
-    for h in hits:
-        if len(pack) >= k:
-            break
-        if h["id"] not in {p["id"] for p in pack}:
-            pack.append(h)
+    if k > 0:
+        seen_types = set()
+        for h in hits:
+            if len(pack) >= k:
+                break
+            if h["memory_type"] not in seen_types or len(pack) < max(1, k // 2):
+                pack.append(h)
+                seen_types.add(h["memory_type"])
+        for h in hits:
+            if len(pack) >= k:
+                break
+            if h["id"] not in {p["id"] for p in pack}:
+                pack.append(h)
 
-    project = get_project(project_id, db_path=db_path) if project_id else None
+    project = get_project(resolved_id, db_path=db_path) if resolved_id else None
     project_slice = None
     if project:
         project_slice = {
@@ -92,7 +110,6 @@ def build_pack(
             "current_summary": project.get("current_summary"),
         }
 
-    # Strip component detail for injection; keep provenance
     injected = []
     token_cost = 0
     for h in pack:
@@ -108,7 +125,6 @@ def build_pack(
             "provenance_message_ids": json.loads(h["provenance_message_ids"] or "[]"),
             "score": round(h["score"], 4),
         }
-        # Label agent-inferred clearly
         if h["origin"] == "agent_inferred":
             item["label"] = "AGENT_INFERRED_NOT_USER_STATED"
         injected.append(item)
@@ -121,9 +137,13 @@ def build_pack(
         "query": query,
         "expanded_queries": expanded,
         "project": project_slice,
+        "project_resolution": resolution.as_dict(),
         "memories": injected,
         "approx_token_cost": token_cost,
         "pack_size": len(injected),
+        "destination": destination,
+        "request_id": request_id,
+        "turn_id": turn_id,
     }
 
     if log:
@@ -134,8 +154,15 @@ def build_pack(
             scores={i: score_map.get(i, 0.0) for i in [h["id"] for h in hits]},
             injected_ids=[m["id"] for m in injected],
             approx_token_cost=token_cost,
-            project_id=project_id,
-            context={"pack_size": len(injected)},
+            project_id=resolved_id,
+            context={
+                "pack_size": len(injected),
+                "destination": destination,
+                "project_resolution": resolution.as_dict(),
+            },
+            request_id=request_id,
+            turn_id=turn_id,
+            model_used=model_used,
             db_path=db_path,
         )
     return result

@@ -21,6 +21,9 @@ dependencies = [
 Homepage = "https://github.com/rallazov/agentomory"
 Repository = "https://github.com/rallazov/agentomory"
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [project.scripts]
 agentomory = "phase1.cli:main"
 
