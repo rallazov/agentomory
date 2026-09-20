@@ -168,7 +168,7 @@ def main(argv=None):
         sp.add_argument("-k", type=int, default=8, help="useful maximum pack size (may return fewer or zero)")
         sp.add_argument("--project", default=None, help="explicit current project id from the calling agent")
         sp.add_argument("--current-project", default=None, dest="current_project")
-        sp.add_argument("--min-score", type=float, default=0.36)
+        sp.add_argument("--min-score", type=float, default=0.55)
         sp.add_argument("--destination", default="local", choices=("local", "external_model"))
         sp.add_argument("--request-id", default=None)
         sp.add_argument("--turn-id", default=None)

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from .embed import get_embedder
 from .memory_pack import build_pack
+from .retrieve import DEFAULT_MIN_SCORE
 from .schema import connect, ensure_schema
 from .vocabulary import upsert_term
 
@@ -328,7 +329,7 @@ def _run_cases(cases: List[Dict[str, Any]], db_path, out_path: Path | None = Non
             project_id=case.get("current_project_id") or case.get("project_hint"),
             db_path=db_path,
             log=True,
-            min_score=float(case["min_score"]) if case.get("min_score") is not None else 0.36,
+            min_score=float(case["min_score"]) if case.get("min_score") is not None else DEFAULT_MIN_SCORE,
         )
         results.append(_score_one(case, pack, conn))
     payload = {

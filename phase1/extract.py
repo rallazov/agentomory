@@ -93,6 +93,12 @@ _TEMPORAL = [
     (r"\b(?:yesterday|today|tomorrow|last week|next week|this week|next month)\b", "relative"),
 ]
 
+_META_COMMENTARY = re.compile(
+    r"\b(just wanted to mention|the main thing i wanted|rambling|by the way|"
+    r"after (?:that|this) i guess|lunch plans)\b",
+    re.I,
+)
+
 _CORRECTION = re.compile(
     r"\b(that(?:'| i)?s wrong|actually|correction|not true|instead|no longer|"
     r"we (?:changed|reverted)|supersede|forget that|ignore that)\b",
@@ -223,6 +229,8 @@ def canonicalize(text: str, memory_type: str) -> str:
     elif memory_type == "correction":
         t = re.sub(r"^(?:actually[,:]?\s+|that's wrong[,:]?\s+|correction[,:]?\s+)", "", t, flags=re.I)
     t = re.sub(r"\s*(?:thanks|thank you|ok|okay)[.!]?\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s+after rambling\b.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+and lunch plans\b.*$", "", t, flags=re.I)
     t = t.strip(" ,;")
     if not t:
         t = text.strip()
@@ -413,6 +421,14 @@ def extract_candidates(
     for unit in units:
         if len(unit) < 12:
             continue
+        if _META_COMMENTARY.search(unit):
+            stripped = re.sub(
+                r"\bthe main thing i wanted to lock in\b", " ", unit, flags=re.I
+            )
+            stripped = _META_COMMENTARY.sub(" ", stripped)
+            stripped = re.sub(r"\s+", " ", stripped).strip()
+            if len(stripped) < 24 or not looks_memory_worthy(stripped):
+                continue
         mtype, imp, conf = classify_proposition(unit)
         if role == "assistant":
             conf = min(conf, 0.45)

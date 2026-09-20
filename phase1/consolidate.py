@@ -22,6 +22,7 @@ ACTION_CONFLICT = "CONFLICT"
 # Conservative thresholds. SUPERSEDE is intentionally the strictest.
 SEM_EXACT = 0.92
 SEM_MERGE = 0.84
+SEM_MERGE_SHARED = 0.72
 SEM_SUPERSEDE = 0.86
 SEM_CONFLICT_LO = 0.70
 SEM_CONFLICT_HI = 0.84
@@ -76,11 +77,18 @@ _CONTENT_STOP = {
 }
 
 
+def _content_tokens(text: str) -> set:
+    return {t for t in _token_set(text) if len(t) >= 5 and t not in _CONTENT_STOP}
+
+
 def _mutual_exclusive_content(a: str, b: str) -> bool:
     """True when both statements carry distinct content words — likely different propositions."""
-    sa = {t for t in _token_set(a) if len(t) >= 5 and t not in _CONTENT_STOP}
-    sb = {t for t in _token_set(b) if len(t) >= 5 and t not in _CONTENT_STOP}
+    sa, sb = _content_tokens(a), _content_tokens(b)
     return bool(sa - sb) and bool(sb - sa)
+
+
+def _shared_content(a: str, b: str) -> bool:
+    return bool(_content_tokens(a) & _content_tokens(b))
 
 
 def _compatible_types(a: Optional[str], b: Optional[str]) -> bool:
@@ -282,12 +290,21 @@ def decide_action(
             return ACTION_IGNORE, best, meta
         return ACTION_UPDATE, best, meta
 
-    if sem >= SEM_MERGE and _compatible_types(candidate.get("memory_type"), best["memory_type"]):
+    exclusive = _mutual_exclusive_content(candidate["canonical_text"], best["canonical_text"])
+    shared = _shared_content(candidate["canonical_text"], best["canonical_text"])
+    # High lexical overlap or shared content words + mid cosine = paraphrase,
+    # even when wording differs enough that BGE scores ~0.74.
+    paraphrase = (
+        sem >= SEM_MERGE
+        or (sem >= SEM_MERGE_SHARED and shared and not exclusive)
+        or (jac >= 0.50 and sem >= 0.45 and not exclusive)
+    )
+    if paraphrase and _compatible_types(candidate.get("memory_type"), best["memory_type"]):
         if _same_project(candidate, best):
             if (
                 candidate.get("memory_type") in ("decision", "preference", "constraint")
                 and best["memory_type"] in ("decision", "preference", "constraint")
-                and _mutual_exclusive_content(candidate["canonical_text"], best["canonical_text"])
+                and exclusive
             ):
                 return ACTION_CONFLICT, best, meta
             return ACTION_MERGE, best, meta

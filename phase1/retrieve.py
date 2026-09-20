@@ -38,9 +38,10 @@ TYPE_BOOST = {
 }
 
 # Absolute relevance floor. Pack size is a maximum, not a quota.
-DEFAULT_MIN_SCORE = 0.36
-DEFAULT_RELATIVE_KEEP = 0.45
-DEFAULT_MIN_COSINE = 0.35
+DEFAULT_MIN_SCORE = 0.55
+DEFAULT_RELATIVE_KEEP = 0.70
+# BGE-small unrelated English often sits ~0.45–0.55 cosine; require above that.
+DEFAULT_MIN_COSINE = 0.62
 
 
 def expand_query(query: str, *, conn=None, db_path=None) -> List[str]:
@@ -68,16 +69,36 @@ def _recency_score(updated_at: str) -> float:
         return 0.5
 
 
+_FTS_STOP = {
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can",
+    "had", "her", "was", "one", "our", "out", "has", "have", "been", "from",
+    "they", "this", "that", "with", "what", "when", "your", "how", "why",
+    "about", "into", "just", "over", "also", "than",
+}
+
+
 def _fts_query(text: str) -> str:
-    words = re.findall(r"[A-Za-z0-9]{3,}", text)
-    return " OR ".join(words[:10]) if words else text
+    words = [
+        w
+        for w in re.findall(r"[A-Za-z0-9]{3,}", text)
+        if w.lower() not in _FTS_STOP
+    ]
+    return " OR ".join(words[:10]) if words else ""
+
+
+def _content_tokens(text: str) -> set:
+    return {
+        w
+        for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+        if w not in _FTS_STOP
+    }
 
 
 def _token_overlap(query: str, text: str) -> float:
-    q = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
+    q = _content_tokens(query)
     if not q:
         return 0.0
-    m = set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
+    m = _content_tokens(text)
     return len(q & m) / len(q)
 
 
@@ -187,8 +208,8 @@ def hybrid_search(
         vs = vec_score.get(mid, 0.0)
         fs = fts_score.get(mid, 0.0)
         overlap = _token_overlap(query, f"{row['title']} {row['canonical_text']}")
-        # Require some real signal; importance alone must not keep a memory.
-        if vs < DEFAULT_MIN_COSINE and overlap < 0.12 and fs < 0.55:
+        # BGE baseline cosine is high; require a real neighbor or lexical overlap.
+        if vs < DEFAULT_MIN_COSINE and overlap < 0.15:
             continue
 
         imp = float(row["importance"])

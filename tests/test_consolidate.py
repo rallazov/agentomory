@@ -56,9 +56,8 @@ def test_similar_but_different_decisions_preserved(db_path):
     assert n == 2
 
 
-def test_correction_supersession_is_conservative(db_path):
+def test_uncertain_correction_preserves_both(db_path):
     a = apply_memory(_cand("Use PostgreSQL for the local memory store."), db_path=db_path)
-    # Uncertain correction (low confidence) must not destroy current truth.
     weak = apply_memory(
         _cand(
             "That's wrong — use SQLite for the local memory store.",
@@ -73,11 +72,20 @@ def test_correction_supersession_is_conservative(db_path):
     conn = connect(db_path)
     old = conn.execute("SELECT status FROM memories WHERE id=?", (a["id"],)).fetchone()
     assert old["status"] == "active"
+    n = conn.execute("SELECT COUNT(*) c FROM memories WHERE status='active'").fetchone()["c"]
     conn.close()
+    assert n >= 2
 
+
+def test_confident_correction_can_supersede(db_path):
+    a = apply_memory(
+        _cand("Use PostgreSQL for the local memory store.", confidence=0.9),
+        db_path=db_path,
+    )
     strong = apply_memory(
         _cand(
-            "That's wrong — use SQLite for the local memory store.",
+            "Correction: use PostgreSQL for the local memory store is wrong; "
+            "use SQLite for the local memory store.",
             memory_type="correction",
             appears_to_correct=True,
             confidence=0.95,
@@ -85,12 +93,17 @@ def test_correction_supersession_is_conservative(db_path):
         ),
         db_path=db_path,
     )
-    # Highly confident correction of the same store decision may supersede.
-    assert strong["action"] in ("SUPERSEDE", "CONFLICT", "CREATE", "MERGE")
+    assert strong["action"] in ("SUPERSEDE", "CONFLICT", "CREATE")
     if strong["action"] == "SUPERSEDE":
         conn = connect(db_path)
         old = conn.execute("SELECT status FROM memories WHERE id=?", (a["id"],)).fetchone()
         assert old["status"] == "superseded"
+        conn.close()
+    else:
+        # Conservative path: both preserved, original still active.
+        conn = connect(db_path)
+        old = conn.execute("SELECT status FROM memories WHERE id=?", (a["id"],)).fetchone()
+        assert old["status"] == "active"
         conn.close()
 
 

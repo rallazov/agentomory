@@ -222,6 +222,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 
 CREATE INDEX IF NOT EXISTS idx_memory_sources_memory ON memory_sources(memory_id);
 CREATE INDEX IF NOT EXISTS idx_vocabulary_norm ON vocabulary(kind, normalized);
+"""
+
+# Created after migrate_schema so older DBs get new columns first.
+_SCHEMA_INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_request ON retrieval_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_log_turn ON retrieval_log(turn_id);
 """
@@ -409,4 +413,6 @@ def ensure_schema(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
             """
         )
     migrate_schema(conn)
+    conn.executescript(_SCHEMA_INDEXES_SQL)
+    conn.commit()
     return conn

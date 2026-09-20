@@ -51,10 +51,11 @@ def test_canonical_is_not_truncated_original():
     )
     cands = extract_candidates(long_msg, role="user", message_id="m2")
     assert cands
+    assert any("sqlite" in c["canonical_text"].lower() for c in cands)
     for c in cands:
+        assert c["canonical_text"] != long_msg
         assert c["canonical_text"] != long_msg[:800]
         assert "rambling about the weather" not in c["canonical_text"].lower()
-        assert "sqlite" in c["canonical_text"].lower()
 
 
 def test_correction_flag_and_temporal():
