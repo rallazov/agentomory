@@ -1,24 +1,118 @@
-"""Rules-based extraction: useful candidates only; label origin/confidence."""
+"""Semantic/atomic extraction: regex is a cheap prefilter, not the final authority."""
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import os
 
 from .consolidate import apply_memory
-from .schema import connect, ensure_schema
+from .schema import MEMORY_TYPES, connect, ensure_schema
+from .vocabulary import terms_matching_query
+
+# Cheap prefilter only — does this text *maybe* contain durable memory?
+# Classification and canonicalization happen after splitting, not here.
+_PREFILTER_CUES = re.compile(
+    r"\b("
+    r"decid(?:e|ed|ing|es)|decision|lock(?:ed)?\s+in|going with|"
+    r"always|never|must(?:\s+not)?|do not|don't|prefer|rule|"
+    r"cannot|can't|out of scope|constraint|"
+    r"goal|priority|by\s+\w+|deadline|"
+    r"need to|please|todo|follow up|"
+    r"should we|open question|not sure|unclear|"
+    r"wrong|actually|correction|not true|instead|no longer|revert|supersede|"
+    r"failed|worked|lesson|learned|"
+    r"approach|strategy|"
+    r"we (?:will|are|use|chose|chose)|i want|i prefer"
+    r")\b",
+    re.I,
+)
+
+# Cue weights are *signals* for type scoring, never the sole authority.
+_TYPE_CUES: List[Tuple[str, str, float]] = [
+    ("correction", r"\b(that(?:'| i)?s wrong|actually|correction|not true|instead|no longer|revert|supersede|we changed)\b", 2.4),
+    ("constraint", r"\b(must not|cannot|can't|out of scope|do not|don't|never|no longer allowed)\b", 2.0),
+    ("preference", r"\b(always|prefer|standing rule|rule is|i want you to|please always)\b", 1.8),
+    ("decision", r"\b(decid(?:e|ed|ing)|decision|locked in|going with|we(?:'| a)?re going with|chose|chosen)\b", 2.0),
+    ("goal", r"\b(goal is|aim is|target is|by \w+|deadline|priority is)\b", 1.6),
+    ("task", r"\b(need to|please|todo|follow up|open item)\b", 1.4),
+    ("open_question", r"\b(should we|what if|open question|still unclear|not sure|unresolved)\b", 1.8),
+    ("outcome", r"\b(it failed|that worked|we learned|hurt us|result was)\b", 1.6),
+    ("lesson", r"\b(lesson|never again|don't repeat|what failed)\b", 1.7),
+    ("strategy", r"\b(approach|strategy|playbook|we will handle)\b", 1.3),
+    ("project_state", r"\b(currently|in progress|shipped|blocked|stage|status is)\b", 1.2),
+    ("fact", r"\b(is|are|path|repo|uses|named|located)\b", 0.4),
+]
+
+_TYPE_PROTOTYPES: Dict[str, str] = {
+    "decision": "A locked choice was made. We decided to use this option.",
+    "preference": "A standing rule or preferred way of working. Always do this.",
+    "constraint": "A hard restriction. Do not do this. This is out of scope.",
+    "goal": "A target or deadline we are aiming for.",
+    "task": "An action someone still needs to take.",
+    "open_question": "An unresolved question that is still unclear.",
+    "correction": "A previous belief was wrong and is being replaced.",
+    "outcome": "Something we tried succeeded or failed.",
+    "lesson": "A durable lesson from a failure so we do not repeat it.",
+    "strategy": "An approach we will use for this class of problem.",
+    "project_state": "Current status of a project or workstream.",
+    "fact": "A stable factual statement about the system or world.",
+}
+
+_FILLER_LEAD = re.compile(
+    r"^(?:(?:also|and also|and|please|oh|well|look|so|anyway|by the way|plus)[,:]?\s+)+",
+    re.I,
+)
+_THINK_LEAD = re.compile(
+    r"^(?:i (?:think|believe|feel|guess|suspect)|we think)(?: that)?\s+",
+    re.I,
+)
+_DECISION_LEAD = re.compile(
+    r"^(?:we (?:have )?(?:decided|locked in|chose)|decision(?: is|:)|"
+    r"we(?:'re| are) going with|let's go with|we will use|locked choice(?: is|:)?)\s+",
+    re.I,
+)
+_PREF_LEAD = re.compile(
+    r"^(?:i (?:want you to|prefer(?: that)?|would like you to)|please always|the rule is)\s+",
+    re.I,
+)
+_CONSTRAINT_LEAD = re.compile(
+    r"^(?:you must not|we must not|do not|don't|never|please (?:do not|don't|never))\s+",
+    re.I,
+)
+
+_TEMPORAL = [
+    (r"\bby (?:end of )?(?:january|february|march|april|may|june|july|august|september|october|november|december|\d{1,2}(?:/\d{1,2})?(?:/\d{2,4})?|\d{4})\b", "deadline"),
+    (r"\bas of (?:today|now|[A-Za-z]+ \d{1,2})\b", "as_of"),
+    (r"\b(?:no longer|not anymore|formerly|used to)\b", "ended"),
+    (r"\b(?:starting|from) (?:today|now|next \w+|this \w+)\b", "start"),
+    (r"\b(?:yesterday|today|tomorrow|last week|next week|this week|next month)\b", "relative"),
+]
+
+_META_COMMENTARY = re.compile(
+    r"\b(just wanted to mention|the main thing i wanted|rambling|by the way|"
+    r"after (?:that|this) i guess|lunch plans)\b",
+    re.I,
+)
+
+_CORRECTION = re.compile(
+    r"\b(that(?:'| i)?s wrong|actually|correction|not true|instead|no longer|"
+    r"we (?:changed|reverted)|supersede|forget that|ignore that)\b",
+    re.I,
+)
+
+SKIP_MD_SUBSTRINGS = ("name-shortlist", "marketer-brief")
+ASSISTANT_ALLOW = re.compile(
+    r"\b(non-negotiable|standing rule|locked|must not|decision:|we agreed)\b",
+    re.I,
+)
 
 
 def _durable_md_paths() -> List[Path]:
-    """Durable markdown paths for Layer B extraction.
-
-    Set AGENTOMORY_DURABLE_MD to a colon-separated list of files, or place
-    markdown under ~/.agentomory/durable/*.md. Defaults to empty (no personal paths).
-    """
     env = os.environ.get("AGENTOMORY_DURABLE_MD")
     if env:
         return [Path(p) for p in env.split(":") if p.strip()]
@@ -27,32 +121,8 @@ def _durable_md_paths() -> List[Path]:
         return sorted(default_dir.glob("*.md"))
     return []
 
+
 DURABLE_MD: List[Path] = _durable_md_paths()
-
-SKIP_MD_SUBSTRINGS = ("name-shortlist", "marketer-brief")
-
-# User-turn patterns → high confidence
-USER_RULES: List[Tuple[str, str, float, float]] = [
-    # type, pattern, importance, confidence
-    ("decision", r"\b(decided|decision|we(?:'| a)?re going with|lock(?:ed)? in|non-negotiable)\b", 0.85, 0.9),
-    ("preference", r"\b(always|never|must|do not|don't|prefer|rule is|I want you to)\b", 0.8, 0.9),
-    ("constraint", r"\b(must not|cannot|can't|out of scope|do not touch|no PR|don't commit)\b", 0.85, 0.9),
-    ("goal", r"\b(goal is|by november|twenty (?:test )?users|priority)\b", 0.8, 0.85),
-    ("task", r"\b(need to|please|open item|todo|follow up|rename|delete the)\b", 0.65, 0.75),
-    ("open_question", r"\b(should we|what if|open question|still unclear|not sure)\b", 0.55, 0.7),
-    ("correction", r"\b(that(?:'| i)?s wrong|actually|correction|not true|revert|supersede)\b", 0.9, 0.95),
-    ("outcome", r"\b(it failed|that worked|lesson|we learned|hurt us)\b", 0.75, 0.8),
-    ("lesson", r"\b(lesson|never again|don't repeat|what failed)\b", 0.8, 0.85),
-    ("strategy", r"\b(approach|strategy|outer-loop|babysitter|story-bound)\b", 0.7, 0.75),
-    ("fact", r"\b(path is|repo is|sqlite|Nylas|application-tracker)\b", 0.6, 0.8),
-    ("project_state", r"\b(sprint 1|stage-?1|calendar strip|production (?:API )?blocker)\b", 0.7, 0.8),
-]
-
-# Assistant turns: only extract if strongly rule-like; lower confidence + agent_inferred
-ASSISTANT_ALLOW = re.compile(
-    r"\b(non-negotiable|standing rule|locked|must not|decision:|we agreed)\b",
-    re.I,
-)
 
 
 def _now() -> str:
@@ -68,82 +138,451 @@ def _title_from(text: str) -> str:
     return (t[:80] + "…") if len(t) > 80 else t
 
 
-def classify_user_text(text: str) -> Optional[Tuple[str, float, float]]:
-    for mtype, pat, imp, conf in USER_RULES:
+def looks_memory_worthy(text: str) -> bool:
+    """Cheap prefilter. True means 'worth splitting', not 'this string is a memory'."""
+    t = (text or "").strip()
+    if len(t) < 12:
+        return False
+    if re.fullmatch(r"(ok|okay|thanks|thank you|yes|no|sure|got it|hi|hello)[.!]?", t, re.I):
+        return False
+    if len(t) > 8000:
+        return False
+    if _PREFILTER_CUES.search(t):
+        return True
+    # Longer statements can still be durable facts even without cue words.
+    return len(t) >= 48 and bool(re.search(r"\b(is|are|will|should|use|uses)\b", t, re.I))
+
+
+def _looks_like_claim(text: str) -> bool:
+    t = text.strip()
+    if len(t) < 12:
+        return False
+    return bool(re.search(r"\b([a-z]{3,})\b", t, re.I))
+
+
+def split_propositions(text: str) -> List[str]:
+    """Split one message into independent candidate units."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks: List[str] = []
+    if re.search(r"(?m)^\s*(?:[-*]|\d+[.)])\s+", text):
+        parts = re.split(r"(?m)^\s*(?:[-*]|\d+[.)])\s+", text)
+        chunks = [p.strip() for p in parts if p.strip()]
+    if not chunks:
+        chunks = [text]
+
+    out: List[str] = []
+    sent_split = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'])|(?:\n{2,})")
+    for chunk in chunks:
+        for sent in sent_split.split(chunk):
+            sent = sent.strip()
+            if not sent:
+                continue
+            bits = re.split(r"\s+(?:and also|additionally,|;)\s+", sent, flags=re.I)
+            expanded: List[str] = []
+            for bit in bits:
+                and_bits = re.split(
+                    r"\s+and\s+(?=(?:we|i|do|don't|never|always|must|please)\b)",
+                    bit,
+                    flags=re.I,
+                )
+                if len(and_bits) > 1 and all(_looks_like_claim(b) for b in and_bits):
+                    expanded.extend(and_bits)
+                else:
+                    expanded.append(bit)
+            out.extend(b.strip(" \t-") for b in expanded if b.strip())
+    # Drop leftover greetings
+    return [x for x in out if looks_memory_worthy(x) or (len(x) >= 16 and _looks_like_claim(x))]
+
+
+def extract_temporal(text: str) -> Optional[str]:
+    hits = []
+    for pat, kind in _TEMPORAL:
+        m = re.search(pat, text, re.I)
+        if m:
+            hits.append({"kind": kind, "text": m.group(0)})
+    if not hits:
+        return None
+    return json.dumps(hits[0])
+
+
+def appears_to_correct(text: str) -> bool:
+    return bool(_CORRECTION.search(text or ""))
+
+
+def canonicalize(text: str, memory_type: str) -> str:
+    """Concise atomic statement — never a truncated dump of the original message."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    t = t.strip("\"'`")
+    t = _FILLER_LEAD.sub("", t)
+    t = _THINK_LEAD.sub("", t)
+    if memory_type == "decision":
+        t = _DECISION_LEAD.sub("", t)
+        t = re.sub(r"^to\s+", "", t, flags=re.I)
+    elif memory_type == "preference":
+        t = _PREF_LEAD.sub("", t)
+    elif memory_type == "constraint":
+        t = _CONSTRAINT_LEAD.sub("", t)
+        if t and not re.match(r"^(?:do not|don't|never|must not)\b", t, re.I):
+            t = "Do not " + t[0].lower() + t[1:] if t[:1].isupper() else "Do not " + t
+    elif memory_type == "correction":
+        t = re.sub(r"^(?:actually[,:]?\s+|that's wrong[,:]?\s+|correction[,:]?\s+)", "", t, flags=re.I)
+    t = re.sub(r"\s*(?:thanks|thank you|ok|okay)[.!]?\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s+after rambling\b.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+and lunch plans\b.*$", "", t, flags=re.I)
+    t = t.strip(" ,;")
+    if not t:
+        t = text.strip()
+    # If still huge, keep the cue-bearing clause, not a raw slice of the user dump.
+    if len(t) > 240:
+        clauses = re.split(r"[,;] ", t)
+        scored = sorted(clauses, key=lambda c: (1 if _PREFILTER_CUES.search(c) else 0, -len(c)), reverse=True)
+        t = scored[0] if scored else t[:240]
+    if t and t[0].islower():
+        t = t[0].upper() + t[1:]
+    if t and t[-1] not in ".!?":
+        t += "."
+    return t
+
+
+def _cue_scores(text: str) -> Dict[str, float]:
+    scores = {t: 0.0 for t in MEMORY_TYPES}
+    for mtype, pat, weight in _TYPE_CUES:
         if re.search(pat, text, re.I):
-            return mtype, imp, conf
-    return None
+            scores[mtype] += weight
+    if text.strip().endswith("?"):
+        scores["open_question"] += 1.5
+    if appears_to_correct(text):
+        scores["correction"] += 1.2
+    return scores
+
+
+def _prototype_scores(text: str) -> Dict[str, float]:
+    """Embedding similarity to generic type prototypes when an embedder is available."""
+    scores = {t: 0.0 for t in MEMORY_TYPES}
+    try:
+        from .embed import get_embedder
+        import numpy as np
+
+        emb = get_embedder()
+        q = emb.embed_documents([text])[0]
+        proto_texts = [_TYPE_PROTOTYPES[t] for t in MEMORY_TYPES]
+        vecs = emb.embed_documents(proto_texts)
+        qv = np.frombuffer(q, dtype=np.float32)
+        qn = float(np.linalg.norm(qv)) or 1.0
+        for t, blob in zip(MEMORY_TYPES, vecs):
+            pv = np.frombuffer(blob, dtype=np.float32)
+            pn = float(np.linalg.norm(pv)) or 1.0
+            scores[t] = float(np.dot(qv, pv) / (qn * pn))
+    except Exception:
+        pass
+    return scores
+
+
+def classify_proposition(text: str) -> Tuple[str, float, float]:
+    """Multi-signal type: cue weights + prototypes + structure. Regex is not final authority."""
+    cues = _cue_scores(text)
+    protos = _prototype_scores(text)
+    combined: Dict[str, float] = {}
+    for t in MEMORY_TYPES:
+        combined[t] = 0.55 * cues[t] + 1.1 * max(0.0, protos[t] - 0.15)
+    # Slight prior toward fact when nothing else fires.
+    if max(cues.values()) == 0:
+        combined["fact"] += 0.35
+    mtype = max(combined, key=combined.get)
+    strength = combined[mtype]
+    if strength < 0.35:
+        mtype = "fact"
+        strength = 0.4
+    importance = {
+        "correction": 0.9,
+        "constraint": 0.85,
+        "decision": 0.85,
+        "preference": 0.8,
+        "goal": 0.8,
+        "lesson": 0.8,
+        "outcome": 0.75,
+        "project_state": 0.7,
+        "strategy": 0.7,
+        "task": 0.65,
+        "fact": 0.6,
+        "open_question": 0.55,
+    }.get(mtype, 0.55)
+    if re.search(r"\b(non-negotiable|must not|never|hard rule)\b", text, re.I):
+        importance = min(0.95, importance + 0.08)
+    confidence = min(0.93, 0.62 + 0.12 * min(strength, 2.5))
+    return mtype, importance, confidence
+
+
+def associate_context(text: str, *, conn=None, db_path=None) -> Dict[str, Any]:
+    project_id = None
+    entity_ids: List[str] = []
+    entity_names: List[str] = []
+    if conn is None and db_path is None:
+        return {"project_id": None, "entity_ids": [], "entity_names": []}
+    try:
+        hits = terms_matching_query(text, conn=conn, db_path=db_path)
+    except Exception:
+        hits = []
+    for h in hits:
+        if h.get("project_id") and not project_id:
+            project_id = h["project_id"]
+        if h.get("entity_id"):
+            entity_ids.append(h["entity_id"])
+            if h.get("term"):
+                entity_names.append(h["term"])
+    return {
+        "project_id": project_id,
+        "entity_ids": list(dict.fromkeys(entity_ids)),
+        "entity_names": list(dict.fromkeys(entity_names)),
+    }
+
+
+@dataclass
+class MemoryCandidate:
+    memory_type: str
+    canonical_text: str
+    title: str
+    importance: float
+    confidence: float
+    origin: str
+    explicit: bool
+    appears_to_correct: bool
+    source_message_id: Optional[str] = None
+    source_conversation_id: Optional[str] = None
+    project_id: Optional[str] = None
+    entity_ids: List[str] = field(default_factory=list)
+    entity_names: List[str] = field(default_factory=list)
+    temporal_meaning: Optional[str] = None
+    provenance_note: Optional[str] = None
+    source_kind: str = "voice_call_message"
+    provenance_artifact_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": f"ext-{_hash((self.source_message_id or '') + self.memory_type + self.canonical_text)}",
+            "memory_type": self.memory_type,
+            "title": self.title,
+            "canonical_text": self.canonical_text,
+            "importance": self.importance,
+            "confidence": self.confidence,
+            "origin": self.origin,
+            "explicit": self.explicit,
+            "appears_to_correct": self.appears_to_correct,
+            "source_message_id": self.source_message_id,
+            "source_conversation_id": self.source_conversation_id,
+            "provenance_conversation_id": self.source_conversation_id,
+            "provenance_message_ids": json.dumps(
+                [self.source_message_id] if self.source_message_id else []
+            ),
+            "project_id": self.project_id,
+            "entity_ids": self.entity_ids,
+            "entity_names": self.entity_names,
+            "temporal_meaning": self.temporal_meaning,
+            "provenance_note": self.provenance_note,
+            "source_kind": self.source_kind,
+            "provenance_artifact_id": self.provenance_artifact_id,
+        }
+
+
+def extract_candidates(
+    text: str,
+    *,
+    role: str = "user",
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    source_kind: str = "voice_call_message",
+    artifact_id: Optional[str] = None,
+    provenance_note: Optional[str] = None,
+    conn=None,
+    db_path=None,
+) -> List[Dict[str, Any]]:
+    """
+    Produce structured atomic candidates from one message.
+    One user message may yield multiple independent memories.
+    """
+    if not looks_memory_worthy(text):
+        return []
+    if role == "assistant" and not ASSISTANT_ALLOW.search(text):
+        return []
+
+    units = split_propositions(text)
+    if not units:
+        units = [text.strip()]
+
+    origin = "user_stated" if role == "user" else "agent_inferred"
+    if source_kind == "durable_md":
+        origin = "durable_record"
+    explicit = origin in ("user_stated", "durable_record")
+
+    out: List[Dict[str, Any]] = []
+    seen_canon = set()
+    for unit in units:
+        if len(unit) < 12:
+            continue
+        if _META_COMMENTARY.search(unit):
+            stripped = re.sub(
+                r"\bthe main thing i wanted to lock in\b", " ", unit, flags=re.I
+            )
+            stripped = _META_COMMENTARY.sub(" ", stripped)
+            stripped = re.sub(r"\s+", " ", stripped).strip()
+            if len(stripped) < 24 or not looks_memory_worthy(stripped):
+                continue
+        mtype, imp, conf = classify_proposition(unit)
+        if role == "assistant":
+            conf = min(conf, 0.45)
+            imp = min(imp, 0.6)
+            origin = "agent_inferred"
+            explicit = False
+        if source_kind == "durable_md":
+            conf = max(conf, 0.75)
+        canon = canonicalize(unit, mtype)
+        # Reject "canonical == truncated original" style dumps.
+        if canon.strip() == text.strip() and len(text) > 160 and len(units) == 1:
+            # Try a tighter rewrite from the first sentence-like unit.
+            canon = canonicalize(unit[:240], mtype)
+        key = re.sub(r"\s+", " ", canon.lower())
+        if key in seen_canon:
+            continue
+        seen_canon.add(key)
+        assoc = associate_context(unit, conn=conn, db_path=db_path)
+        cand = MemoryCandidate(
+            memory_type=mtype,
+            canonical_text=canon,
+            title=_title_from(canon),
+            importance=imp,
+            confidence=conf,
+            origin=origin,
+            explicit=explicit,
+            appears_to_correct=appears_to_correct(unit) or mtype == "correction",
+            source_message_id=message_id,
+            source_conversation_id=conversation_id,
+            project_id=assoc.get("project_id"),
+            entity_ids=assoc.get("entity_ids") or [],
+            entity_names=assoc.get("entity_names") or [],
+            temporal_meaning=extract_temporal(unit),
+            provenance_note=provenance_note or f"extracted from {role} turn",
+            source_kind=source_kind,
+            provenance_artifact_id=artifact_id,
+        )
+        out.append(cand.to_dict())
+    return out
+
+
+def classify_user_text(text: str) -> Optional[Tuple[str, float, float]]:
+    """Backward-compatible single-label helper. Prefer extract_candidates."""
+    if not looks_memory_worthy(text):
+        return None
+    return classify_proposition(text)
 
 
 def is_useful(text: str) -> bool:
-    t = text.strip()
-    if len(t) < 40:
-        return False
-    if len(t) > 1200:
-        return False
-    # skip pure greetings / ack
-    if re.fullmatch(r"(ok|okay|thanks|thank you|yes|no|sure|got it)[.!]?", t, re.I):
-        return False
-    return True
+    return looks_memory_worthy(text)
+
+
+PROGRESS_KIND_MESSAGES = "messages"
+
+
+def get_extraction_progress(*, db_path=None, conn=None, source_kind: str = PROGRESS_KIND_MESSAGES):
+    own = conn is None
+    if own:
+        conn = ensure_schema(connect(db_path) if db_path else None)
+    row = conn.execute(
+        "SELECT * FROM extraction_progress WHERE source_kind=?", (source_kind,)
+    ).fetchone()
+    out = dict(row) if row else None
+    if own:
+        conn.close()
+    return out
+
+
+def _mark_message_extracted(conn, message: Dict[str, Any]) -> None:
+    now = _now()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO extracted_messages (message_id, conversation_id, extracted_at)
+        VALUES (?,?,?)
+        """,
+        (message["id"], message["conversation_id"], now),
+    )
+    conn.execute(
+        """
+        INSERT INTO extraction_progress (
+          source_kind, last_conversation_id, last_seq, last_message_id,
+          last_created_at, processed_at, notes
+        ) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(source_kind) DO UPDATE SET
+          last_conversation_id=excluded.last_conversation_id,
+          last_seq=excluded.last_seq,
+          last_message_id=excluded.last_message_id,
+          last_created_at=excluded.last_created_at,
+          processed_at=excluded.processed_at,
+          notes=excluded.notes
+        """,
+        (
+            PROGRESS_KIND_MESSAGES,
+            message["conversation_id"],
+            message["seq"],
+            message["id"],
+            message.get("created_at"),
+            now,
+            "messages",
+        ),
+    )
+
+
+def _unprocessed_messages(conn, *, conversation_id: Optional[str] = None, limit: int = 500):
+    """Messages not yet extracted — never re-scan a fixed prefix."""
+    if conversation_id:
+        return conn.execute(
+            """
+            SELECT m.* FROM messages m
+            LEFT JOIN extracted_messages e ON e.message_id = m.id
+            WHERE m.conversation_id=? AND e.message_id IS NULL
+            ORDER BY m.seq
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT m.* FROM messages m
+        LEFT JOIN extracted_messages e ON e.message_id = m.id
+        WHERE e.message_id IS NULL
+        ORDER BY COALESCE(m.created_at, ''), m.conversation_id, m.seq
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
 
 
 def extract_from_messages(
     *, conversation_id: Optional[str] = None, db_path=None, limit: int = 500
 ) -> List[Dict[str, Any]]:
     conn = ensure_schema(connect(db_path) if db_path else None)
-    if conversation_id:
-        rows = conn.execute(
-            "SELECT * FROM messages WHERE conversation_id=? ORDER BY seq",
-            (conversation_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM messages ORDER BY conversation_id, seq LIMIT ?",
-            (limit * 5,),
-        ).fetchall()
-    rows = [dict(r) for r in rows]
+    rows = [dict(r) for r in _unprocessed_messages(conn, conversation_id=conversation_id, limit=limit)]
     conn.close()
 
     results = []
     for r in rows:
-        text = r["text"]
-        if not is_useful(text):
-            continue
-        role = r["role"]
-        if role == "user":
-            hit = classify_user_text(text)
-            if not hit:
-                continue
-            mtype, imp, conf = hit
-            origin = "user_stated"
-        elif role == "assistant":
-            if not ASSISTANT_ALLOW.search(text):
-                continue
-            hit = classify_user_text(text) or ("fact", 0.45, 0.4)
-            mtype, imp, conf = hit
-            conf = min(conf, 0.45)  # never treat agent as user-stated
-            imp = min(imp, 0.6)
-            origin = "agent_inferred"
-        else:
-            continue
-
-        cand = {
-            "id": f"ext-{_hash(r['id'] + mtype)}",
-            "memory_type": mtype,
-            "title": _title_from(text),
-            "canonical_text": text.strip()[:800],
-            "importance": imp,
-            "confidence": conf,
-            "origin": origin,
-            "provenance_conversation_id": r["conversation_id"],
-            "provenance_message_ids": json.dumps([r["id"]]),
-            "provenance_note": f"extracted from {role} turn",
-            "source_kind": "voice_call_message",
-        }
-        out = apply_memory(cand, db_path=db_path)
-        results.append({**out, "type": mtype, "origin": origin})
-        if len(results) >= limit:
-            break
+        cands = extract_candidates(
+            r["text"],
+            role=r["role"],
+            message_id=r["id"],
+            conversation_id=r["conversation_id"],
+            db_path=db_path,
+        )
+        for cand in cands:
+            out = apply_memory(cand, db_path=db_path)
+            results.append({**out, "type": cand["memory_type"], "origin": cand["origin"], "candidate": cand})
+        # Advance the cursor even when a message yields no candidates.
+        conn = ensure_schema(connect(db_path) if db_path else None)
+        try:
+            _mark_message_extracted(conn, r)
+            conn.commit()
+        finally:
+            conn.close()
     return results
 
 
@@ -170,9 +609,7 @@ def register_artifact(path: Path, kind: str, *, db_path=None) -> str:
         conn.close()
 
 
-
 def _section_chunks(md: str) -> List[Tuple[str, str]]:
-    """Split markdown into (heading, body) chunks."""
     parts = re.split(r"\n(?=##\s+)", md)
     out = []
     for p in parts:
@@ -201,37 +638,41 @@ def extract_from_durable_markdown(*, db_path=None) -> List[Dict[str, Any]]:
         text = path.read_text(encoding="utf-8", errors="replace")
         aid = register_artifact(path, "durable_md", db_path=db_path)
         for title, body in _section_chunks(text):
-            # skip huge dumps; take useful paragraphs
             paras = [x.strip() for x in re.split(r"\n\n+", body) if x.strip()]
             for para in paras:
-                if len(para) < 50:
+                if len(para) < 40:
                     continue
                 if para.startswith("- [") or para.startswith("Updated:"):
                     continue
-                hit = classify_user_text(para)
-                # durable written record: treat as durable_record even if pattern weak
-                if hit:
-                    mtype, imp, conf = hit
-                else:
-                    # only keep if looks like a locked bullet / rule
-                    if not re.search(r"^(?:- |\* |\d+\. )", para, re.M) and len(para) < 120:
-                        continue
-                    mtype, imp, conf = "fact", 0.55, 0.75
-                conf = max(conf, 0.75)  # durable md is curated
-                cand = {
-                    "id": f"md-{_hash(str(path) + title + para[:80])}",
-                    "memory_type": mtype,
-                    "title": f"{path.stem}: {title}"[:80],
-                    "canonical_text": para[:900],
-                    "importance": imp,
-                    "confidence": conf,
-                    "origin": "durable_record",
-                    "provenance_artifact_id": aid,
-                    "provenance_conversation_id": None,
-                    "provenance_message_ids": json.dumps([]),
-                    "provenance_note": f"durable markdown {path.name} §{title}",
-                    "source_kind": "durable_md",
-                }
-                out = apply_memory(cand, db_path=db_path)
-                results.append({**out, "path": str(path), "type": mtype})
+                cands = extract_candidates(
+                    para,
+                    role="user",
+                    source_kind="durable_md",
+                    artifact_id=aid,
+                    provenance_note=f"durable markdown {path.name} §{title}",
+                    db_path=db_path,
+                )
+                if not cands and looks_memory_worthy(para):
+                    # curated durable record: keep a single atomic fact if split yielded nothing
+                    mtype, imp, conf = classify_proposition(para)
+                    cands = [
+                        MemoryCandidate(
+                            memory_type=mtype,
+                            canonical_text=canonicalize(para, mtype),
+                            title=f"{path.stem}: {title}"[:80],
+                            importance=imp,
+                            confidence=max(conf, 0.75),
+                            origin="durable_record",
+                            explicit=True,
+                            appears_to_correct=appears_to_correct(para),
+                            temporal_meaning=extract_temporal(para),
+                            provenance_note=f"durable markdown {path.name} §{title}",
+                            source_kind="durable_md",
+                            provenance_artifact_id=aid,
+                        ).to_dict()
+                    ]
+                for cand in cands:
+                    cand["title"] = cand.get("title") or f"{path.stem}: {title}"[:80]
+                    out = apply_memory(cand, db_path=db_path)
+                    results.append({**out, "path": str(path), "type": cand["memory_type"]})
     return results

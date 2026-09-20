@@ -2,11 +2,16 @@
   "ts": null,
   "summary": {
     "n": 0,
-    "right_rate": null,
-    "miss_rate": null,
-    "irrelevant_rate": null,
-    "superseded_used_total": 0,
-    "avg_token_cost": null,
+    "precision_at_k": null,
+    "recall_at_k": null,
+    "top1_correctness": null,
+    "top3_correctness": null,
+    "irrelevant_memory_rate": null,
+    "wrong_project_rate": null,
+    "stale_superseded_memory_rate": null,
+    "contradiction_rate": null,
+    "approx_token_cost": null,
+    "zero_result_correctness": null,
     "avg_pack_size": null
   },
   "results": []

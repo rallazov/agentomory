@@ -21,9 +21,14 @@ python -m phase1.cli eval
 
 ```bash
 python -m phase1.cli pack "your question here"
-python -m phase1.cli pack "calendar sprint" -k 6
+python -m phase1.cli pack "your question here" -k 8 --destination local
 python -m phase1.cli query "local call memory not product RAG"
+python -m phase1.cli eval --fixture
 ```
+
+`k` is a useful maximum. Retrieval may return zero memories when nothing clears the relevance floor.
+
+Project aliases and synonyms live in the `vocabulary` table, not in `retrieve.py` / `memory_pack.py`.
 
 ## Rebuild embeddings
 
